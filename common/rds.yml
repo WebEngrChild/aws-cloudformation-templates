@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for EC2 and RDS instances with security groups'
+
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "System Configuration"
+        Parameters:
+          - Environment
+          - SystemName
+      - Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - EC2PublicSubnet
+          - EC2ImageId
+          - KeyName
+      - Label:
+          default: "RDS Configuration"
+        Parameters:
+          - DBMasterUsername
+          - DBMasterPassword
+          - DBPrivateSubnet1
+          - DBPrivateSubnet2
+      - Label:
+          default: "Common Security group Configuration"
+        Parameters:
+          - VpcId
+          - SourceIpAddress
+          - TaskSecurityGroup
+          - CodeBuildSecurityGroup
+
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------#
+Parameters:
+  # System Config
+  Environment:
+    Default: dev
+    Type: String
+  SystemName:
+    Default: rds
+    Type: String
+
+  # EC2
+  EC2ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+  EC2PublicSubnet:
+    Description: "EC2 Public Subnet"
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-publicId"
+  KeyName:
+    Description: "Key Name"
+    Type: AWS::EC2::KeyPair::KeyName
+
+  # RDS
+  DBMasterUsername:
+    Description: 'RDS database master username'
+    Default: "user"
+    Type: String
+  DBMasterPassword:
+    Description: 'RDS database master password'
+    Default: "password"
+    Type: String
+    NoEcho: true
+  DBPrivateSubnet1:
+    Description: "RDS Private Subnet"
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-private-3-Id"
+  DBPrivateSubnet2:
+    Description: "RDS Private Subnet"
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-private-4-Id"
+
+  # Security Group
+  VpcId:
+    Description: "VPC ID"
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-"
+  SourceIpAddress:
+    Description: 'IP address to allow SSH access to the EC2 instance'
+    Type: String
+    Default: "99.99.99.99/32"
+  TaskSecurityGroup:
+    Description: "Task security group ID for RDS access"
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: "api-dev-task-sg"
+  CodeBuildSecurityGroup:
+    Description: 'CodeBuild security group ID for RDS access'
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: "api-dev-codebuild-sg"
+
+Resources:
+  # ------------------------------------------------------------#
+  # Bastion EC2
+  # ------------------------------------------------------------#
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${SystemName}-${Environment}-ec2-sg"
+      VpcId: !Ref VpcId
+      GroupDescription: 'EC2 security group for SSH access'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SourceIpAddress
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-ec2-bastion-sg"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: 't2.micro'
+      KeyName: !Ref KeyName
+      ImageId: !Ref EC2ImageId
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref EC2PublicSubnet
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          AssociatePublicIpAddress: true
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          sudo yum update -y rpm
+          sudo yum -y localinstall https://dev.mysql.com/get/mysql80-community-release-el7-3.noarch.rpm
+          sudo rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2022
+          sudo yum -y install mysql mysql-community-client
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-ec2-bastion"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  # ------------------------------------------------------------#
+  # RDS
+  # ------------------------------------------------------------#
+  RDSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${SystemName}-${Environment}-rds-instance-sg"
+      VpcId: !Ref VpcId
+      GroupDescription: 'RDS instance security group'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref TaskSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref CodeBuildSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-instance-sg"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'My DB Subnet Group'
+      SubnetIds:
+        - !Ref DBPrivateSubnet1
+        - !Ref DBPrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-subnet-group-sg"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: 'mysql'
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      AllocatedStorage: '20'
+      DBInstanceClass: 'db.t2.micro'
+      VPCSecurityGroups:
+        - !Ref RDSInstanceSecurityGroup
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-instance"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"

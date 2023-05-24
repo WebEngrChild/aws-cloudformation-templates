@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description:
+  Blue Green Update For ECS Fargate with GitHub
+
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "Netowork Configuration"
+        Parameters:
+          - VpcId
+          - CodeBuildSubnetId1
+          - CodeBuildSubnetId2
+      - Label:
+          default: "System Configuration"
+        Parameters:
+          - Environment
+          - SystemName
+      - Label:
+          default: "ECR/ECS Configuration"
+        Parameters:
+          - ECRName
+      - Label:
+          default: "GitHub Configuration"
+        Parameters:
+          - GitHubOrganizationName
+          - GitHubRepositoryName
+          - GitHubBranchName
+
+Parameters:
+  Environment:
+    Default: dev
+    Type: String
+  SystemName:
+    Default: api
+    Type: String
+  VpcId:
+    Description: "VPC ID"
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-"
+  CodeBuildSubnetId1:
+    Description: "CodeBuild Subnet 1st"
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-private1Id"
+  CodeBuildSubnetId2:
+    Description: "CodeBuild Subnet 2nd"
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-private2Id"
+  ECRName:
+    Default: api-dev-repo
+    Description : "ECR Repository Name"
+    Type: String
+  GitHubOrganizationName:
+    Default: GitHubOrganizationName
+    Description : "CI/CD GitHub Organization"
+    Type: String
+  GitHubRepositoryName:
+    Default: go-graphql-jwt-server
+    Description : "CI/CD GitHub Repository"
+    Type: String
+  GitHubBranchName:
+    Default: main
+    Description : "CI/CD GitHub Branch"
+    Type: String
+
+Resources:
+  # ------------------------------------------------------------#
+  #  CI/CD Role
+  # ------------------------------------------------------------#
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${SystemName}-${Environment}-cicd-build-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-build-role"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+  CodeBuildServicePolicy:
+    DependsOn: CodePipelineServiceRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${SystemName}-${Environment}-cicd-build-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+          - Resource: !Sub arn:aws:s3:::${ArtifactBucket}/*
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetObjectVersion
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:GetRepositoryPolicy
+              - ecr:DescribeRepositories
+              - ecr:ListImages
+              - ecr:DescribeImages
+              - ecr:BatchGetImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeDhcpOptions
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:CreateNetworkInterfacePermission
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - ssm:GetParameters
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - rds:*
+      Roles:
+        - !Ref CodeBuildServiceRole
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${SystemName}-${Environment}-cicd-deploy-role"
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${SystemName}-${Environment}-cicd-pipeline-role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-build-role"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+  CodePipelineServicePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${SystemName}-${Environment}-cicd-pipeline-policy"
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Resource:
+              - !Sub arn:aws:s3:::${ArtifactBucket}/*
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+          - Resource: "*"
+            Effect: Allow
+            Action:
+              - codedeploy:CreateDeployment
+              - codedeploy:GetApplication
+              - codedeploy:GetApplicationRevision
+              - codedeploy:GetDeployment
+              - codedeploy:GetDeploymentConfig
+              - codedeploy:RegisterApplicationRevision
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+              - codebuild:BatchGet*
+              - codebuild:Get*
+              - codebuild:List*
+              - s3:*
+              - ecs:*
+              - elasticloadbalancing:*
+              - autoscaling:*
+              - iam:PassRole
+              - codestar-connections:UseConnection
+              - sns:Publish
+      Roles:
+        - !Ref CodePipelineServiceRole
+
+  # ------------------------------------------------------------#
+  #  Build Artifact S3 Bucket
+  # ------------------------------------------------------------#
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${SystemName}-${Environment}-cicd-artifact-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "AES256"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      LifecycleConfiguration:
+        Rules:
+          - Id: !Sub "${SystemName}-${Environment}-cicd-build-artifact-lifecycle"
+            Status: Enabled
+            ExpirationInDays: 400
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-artifact-${AWS::AccountId}"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  # ------------------------------------------------------------#
+  #  GitHub Connection
+  # ------------------------------------------------------------#
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Sub "${SystemName}-${Environment}-cicd-github"
+      ProviderType: GitHub
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-github"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  # ------------------------------------------------------------#
+  #  Code Build LogGroup
+  # ------------------------------------------------------------#
+  CodeBuildLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "${SystemName}-${Environment}-cicd-code-build"
+
+  # ------------------------------------------------------------#
+  #  Code Build Security Group
+  # ------------------------------------------------------------#
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Task Security Group
+      GroupName: !Sub "${SystemName}-${Environment}-codebuild-sg"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-codebuild-sg"
+        - Key: Systemname
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  # ------------------------------------------------------------#
+  #  Code Build
+  # ------------------------------------------------------------#
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildServicePolicy
+    Properties:
+      Name: !Sub "${SystemName}-${Environment}-cicd-code-build"
+      Environment:
+        PrivilegedMode: true
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: "aws/codebuild/amazonlinux2-x86_64-standard:4.0"
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: ECRName
+            Value: !Sub ${ECRName}
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      ServiceRole: !Ref CodeBuildServiceRole
+      Cache:
+        Modes:
+          - "LOCAL_DOCKER_LAYER_CACHE"
+          - "LOCAL_SOURCE_CACHE"
+        Type: "LOCAL"
+      LogsConfig:
+        CloudWatchLogs:
+          Status: "ENABLED"
+          GroupName: !Ref CodeBuildLogGroup
+      Visibility: "PRIVATE"
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 480
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets:
+          - !Ref CodeBuildSubnetId1
+          - !Ref CodeBuildSubnetId2
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-build"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+  # ------------------------------------------------------------#
+  # CodeDeploy
+  # ------------------------------------------------------------#
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub "${SystemName}-${Environment}-code-deploy-app"
+      ComputePlatform: ECS
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-deploy"
+
+  # ------------------------------------------------------------#
+  #  Code Pipeline
+  # ------------------------------------------------------------#
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CodePipelineServicePolicy
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Name: !Sub "${SystemName}-${Environment}-cicd-pipeline"
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeStarSourceConnection
+              Configuration:
+                FullRepositoryId: !Sub
+                  - ${GitHubOrganizationName}/${GitHubRepositoryName}
+                  - GitHubOrganizationName: !Ref GitHubOrganizationName
+                    GitHubRepositoryName: !Ref GitHubRepositoryName
+                ConnectionArn: !Ref GitHubConnection
+                BranchName: !Ref GitHubBranchName
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              RunOrder: 1
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Approval
+          Actions:
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeployToECS
+              Configuration:
+                AppSpecTemplateArtifact: BuildArtifact
+                AppSpecTemplatePath: appspec.yml
+                TaskDefinitionTemplateArtifact: BuildArtifact
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Sub "${SystemName}-${Environment}-deployment-group"
+                Image1ArtifactName:  BuildArtifact
+                Image1ContainerName: IMAGE1_NAME
+              RunOrder: 1
+              InputArtifacts:
+                - Name: BuildArtifact
+              Region: !Ref AWS::Region
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-cicd-pipeline"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+Outputs:
+  CodeDeployGroupName:
+    Value: !Sub "${SystemName}-${Environment}-deployment-group"

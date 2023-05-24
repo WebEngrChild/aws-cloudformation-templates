@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description:
+  ECR Create
+
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "System Configuration"
+        Parameters:
+          - Environment
+          - SystemName
+
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------# 
+Parameters:
+  Environment:
+    Default: dev
+    Type: String
+    AllowedPattern: "(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    ConstraintDescription: must be a valid repository name
+    Description: must be a valid repository name. capital letters are not allowed.
+  SystemName:
+    Default: front
+    Type: String
+    AllowedPattern: "(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    ConstraintDescription: must be a valid repository name
+    Description: must be a valid repository name. capital letters are not allowed.
+
+Resources:
+  # ------------------------------------------------------------#
+  #  ECR
+  # ------------------------------------------------------------#
+  ECR:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub "${SystemName}-${Environment}-repo"
+      EncryptionConfiguration: 
+        EncryptionType: "AES256"
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-${Environment}-repo"
+        - Key: SystemName
+          Value: !Sub "${SystemName}"
+        - Key: Environment
+          Value: !Sub "${Environment}"
+
+Outputs:
+  ECRRepositoryName:
+    Value: !Ref ECR
+    Export:
+      Name: !Sub "${SystemName}-${Environment}-ECR-RepositoryName"
